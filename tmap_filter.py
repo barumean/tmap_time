@@ -1,40 +1,61 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-업체 좌표 목록을 기준점 거리로 필터링하는 모듈.
+기준 주소에서 일정 거리(예: 50km) 이내의 업체만 골라내는 프로그램.
 
-tmap_gui.py 가 사용하는 함수/예외를 제공한다.
+2단계로 동작한다.
+  1) 1차 스크리닝(무료/즉시): 위경도로 기준점과의 직선거리(Haversine)를 구하고
+     우회계수(기본 1.2배)를 곱해 도로거리를 추정한다.
+     '직선거리 x 1.2 > 기준거리'인 곳은 먼저 제거 → API 호출이 확 줄어 빠르다.
+  2) 2차 정밀(API): 1차 통과분에만 TMAP 화물차 경로 API로 실제 도로거리/시간 조회.
 
-처리 방식(2단계):
-  1) 직선거리(하버사인) x 우회계수 로 1차 스크리닝
-     - 실제 도로거리는 직선거리보다 길기 때문에 (직선거리 x 우회계수)가
-       기준 거리를 넘으면 API 호출 없이 제외한다. (API 호출량 절감)
-  2) 1차 통과분만 TMAP 화물차 경로 API로 실제 거리/시간을 조회하고,
-     실제 도로거리가 기준 거리 이내인 업체만 결과에 남긴다.
+결과 CSV 컬럼: 업체명, 주소, 거리(km), 시간   (+직선거리(km) 참고)
+설정(APP_KEY, 차량 제원)은 config.py 사용.
 
-좌표 변환(geocode)과 경로 조회(get_route)는 tmap_distance 모듈을 재사용한다.
+사용 예:
+    python tmap_filter.py --origin "부산 강서구 평강로 271" --max-km 50
+    python tmap_filter.py --origin "부산 ..." --max-km 50 --buffer 1.3
+    python tmap_filter.py --origin-latlon 35.16,128.99 --max-km 30
+    python tmap_filter.py
 """
 
+import argparse
 import csv
 import math
 import os
+import sys
+import time
 
-# tmap_distance 의 기능을 재사용한다.
-from tmap_distance import (
-    TmapError,
-    geocode,
-    get_route,
-    format_duration,
-)
+import requests
 
-__all__ = ["TmapError", "geocode", "get_route", "process_file", "haversine"]
+try:
+    import config
+except ImportError:
+    sys.exit("[오류] config.py 가 없습니다. APP_KEY 를 설정하세요.")
+
+GEOCODE_URL = "https://apis.openapi.sk.com/tmap/geo/fullAddrGeo"
+TRUCK_ROUTE_URL = "https://apis.openapi.sk.com/tmap/truck/routes"
+
+DEFAULT_INPUTS = ["콘크리트_업체_좌표.csv", "아스콘_업체_좌표.csv"]
+ADDR_CANDIDATES = ("주소", "공장사업장주소", "address", "addr")
 
 
-def haversine(origin, dest):
-    """두 (위도, 경도) 사이의 직선거리(km)를 반환한다."""
-    lat1, lon1 = origin
-    lat2, lon2 = dest
-    r = 6371.0  # 지구 반경(km)
+class TmapError(Exception):
+    pass
+
+
+def _first_float(*values):
+    for v in values:
+        if v not in (None, "", "0", "0.0"):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    r = 6371.0088
     p1, p2 = math.radians(lat1), math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlmb = math.radians(lon2 - lon1)
@@ -42,117 +63,224 @@ def haversine(origin, dest):
     return 2 * r * math.asin(math.sqrt(a))
 
 
-def _read_rows(path):
-    """CSV 를 인코딩 자동 감지하여 (행 리스트, 컬럼명) 으로 반환."""
+def format_duration(seconds):
+    seconds = int(round(seconds))
+    h, rem = divmod(seconds, 3600)
+    m = rem // 60
+    return f"{h}시간 {m}분" if h else f"{m}분"
+
+
+def geocode(full_addr, app_key, session, retries=3):
+    params = {
+        "version": "1", "format": "json", "coordType": "WGS84GEO",
+        "fullAddr": full_addr, "appKey": app_key,
+    }
+    last_err = None
+    for attempt in range(retries):
+        try:
+            resp = session.get(GEOCODE_URL, params=params, timeout=10)
+            resp.raise_for_status()
+            data = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            last_err = exc
+            time.sleep(2 ** attempt * 0.5)
+            continue
+        coords = (data.get("coordinateInfo", {}).get("coordinate")) or []
+        if not coords:
+            raise TmapError("좌표 결과 없음 (주소 매칭 실패)")
+        c = coords[0]
+        lat = _first_float(c.get("newLat"), c.get("lat"))
+        lon = _first_float(c.get("newLon"), c.get("lon"))
+        if lat is None or lon is None:
+            raise TmapError("좌표 값이 비어 있음")
+        return lat, lon
+    raise TmapError(f"지오코딩 요청 실패: {last_err}")
+
+
+def _extract_total(data):
+    if "features" in data:
+        for feat in data["features"]:
+            props = feat.get("properties", {})
+            if "totalDistance" in props and "totalTime" in props:
+                return props.get("totalDistance"), props.get("totalTime")
+    props = data.get("properties", data)
+    if "totalDistance" in props and "totalTime" in props:
+        return props.get("totalDistance"), props.get("totalTime")
+    return None, None
+
+
+def get_route(start, end, app_key, session, retries=3):
+    payload = {
+        "startX": str(start[1]), "startY": str(start[0]),
+        "endX": str(end[1]), "endY": str(end[0]),
+        "reqCoordType": "WGS84GEO", "resCoordType": "WGS84GEO",
+        "searchOption": "17", "totalValue": "2",
+        "truckType": str(config.TRUCK_TYPE),
+        "truckWidth": str(config.TRUCK_WIDTH),
+        "truckHeight": str(config.TRUCK_HEIGHT),
+        "truckWeight": str(config.TRUCK_WEIGHT),
+        "truckTotalWeight": str(config.TRUCK_TOTAL_WEIGHT),
+        "truckLength": str(config.TRUCK_LENGTH),
+    }
+    headers = {"appKey": app_key, "Content-Type": "application/json"}
+    last_err = None
+    for attempt in range(retries):
+        try:
+            resp = session.post(TRUCK_ROUTE_URL, params={"version": "1"},
+                                json=payload, headers=headers, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+        except (requests.RequestException, ValueError) as exc:
+            last_err = exc
+            time.sleep(2 ** attempt * 0.5)
+            continue
+        dist, dur = _extract_total(data)
+        if dist is None or dur is None:
+            raise TmapError("경로 응답에서 거리/시간을 찾지 못함")
+        return dist, dur
+    raise TmapError(f"경로 요청 실패: {last_err}")
+
+
+def read_csv(path):
     for enc in ("utf-8-sig", "cp949", "euc-kr", "utf-8"):
         try:
             with open(path, "r", encoding=enc, newline="") as f:
-                reader = csv.DictReader(f)
-                rows = [dict(r) for r in reader]
-                fields = reader.fieldnames
+                text = f.read().replace("\x00", "")
+            reader = csv.DictReader(text.splitlines())
+            rows = [dict(r) for r in reader]
             if rows:
-                return rows, fields
+                return rows, list(reader.fieldnames)
         except (UnicodeDecodeError, LookupError):
             continue
-    raise TmapError(f"CSV 인코딩을 인식할 수 없습니다: {path}")
+    raise SystemExit(f"[오류] CSV 인코딩 인식 실패: {path}")
 
 
-def _pick(row, *candidates):
-    for key in candidates:
-        if key in row and row[key] not in (None, ""):
-            return row[key].strip()
-    return ""
+def pick_addr_col(fieldnames):
+    for k in ADDR_CANDIDATES:
+        if k in fieldnames:
+            return k
+    return None
 
 
-def _float(value):
-    try:
-        return float(str(value).strip())
-    except (TypeError, ValueError):
-        return None
-
-
-def _output_name(input_path, max_km):
-    """입력 파일명에서 결과 파일명을 만든다. 예: 콘크리트_50km이내.csv"""
-    base = os.path.basename(input_path)
-    if "콘크리트" in base:
-        prefix = "콘크리트"
-    elif "아스콘" in base:
-        prefix = "아스콘"
-    else:
-        prefix = os.path.splitext(base)[0]
-    km = int(max_km) if float(max_km).is_integer() else max_km
-    return f"{prefix}_{km}km이내.csv"
+def out_path(input_path, max_km):
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    base = base.replace("_업체_좌표", "").replace("_좌표", "")
+    return f"{base}_{int(max_km)}km이내.csv"
 
 
 def process_file(input_path, origin, max_km, app_key, session, buffer=1.2):
-    """
-    input_path 의 업체 목록을 기준점(origin)에서 max_km 이내로 필터링하여
-    결과 CSV 를 같은 폴더에 저장한다.
+    rows, fieldnames = read_csv(input_path)
+    addr_col = pick_addr_col(fieldnames)
+    if not addr_col:
+        print(f"[건너뜀] {input_path}: 주소 컬럼 없음 {fieldnames}")
+        return
 
-    Parameters
-    ----------
-    input_path : str   업체 좌표 CSV (컬럼: 업체명, 주소/공장사업장주소, 위도, 경도)
-    origin     : tuple (위도, 경도) 기준점
-    max_km     : float 기준 거리(km)
-    app_key    : str   TMAP APP KEY
-    session    : requests.Session
-    buffer     : float 우회계수 (직선거리 x buffer 로 1차 스크리닝)
-    """
-    rows, _ = _read_rows(input_path)
-    name = os.path.basename(input_path)
-    print(f"\n[{name}] 총 {len(rows)}건 처리 시작 (기준 {max_km}km, 우회계수 {buffer})")
-
-    # 1차 스크리닝: 직선거리 x 우회계수
-    screened = []
-    skipped_no_coord = 0
+    total = len(rows)
+    no_coord = 0
+    candidates = []
     for row in rows:
-        lat = _float(_pick(row, "위도", "lat"))
-        lon = _float(_pick(row, "경도", "lon"))
+        lat = _first_float(row.get("위도"))
+        lon = _first_float(row.get("경도"))
         if lat is None or lon is None:
-            skipped_no_coord += 1
+            no_coord += 1
             continue
-        straight = haversine(origin, (lat, lon))
-        if straight * buffer <= max_km:
-            screened.append((row, lat, lon, straight))
+        d = haversine_km(origin[0], origin[1], lat, lon)
+        if d * buffer <= max_km:
+            candidates.append((row, addr_col, lat, lon, d))
 
-    print(f"  1차 통과(직선거리 기준): {len(screened)}건 "
-          f"(좌표 없음 {skipped_no_coord}건 제외)")
+    print(f"\n=== {input_path} ===")
+    print(f"  전체 {total} | 좌표없음 {no_coord} | "
+          f"1차통과(직선x{buffer} <= {max_km}km, 직선 {round(max_km / buffer, 1)}km 이내) "
+          f"{len(candidates)} -> API 호출 {len(candidates)}건")
 
-    # 2차: 실제 도로거리/시간 조회
     results = []
-    for idx, (row, lat, lon, straight) in enumerate(screened, 1):
-        company = _pick(row, "업체명", "name")
-        addr = _pick(row, "주소", "공장사업장주소", "address")
+    for i, (row, ac, lat, lon, straight) in enumerate(candidates, 1):
+        name = (row.get("업체명") or "").strip()
+        addr = (row.get(ac) or "").strip()
+        road_km = ""
+        dur_text = ""
+        status = "성공"
         try:
             dist_m, dur_s = get_route(origin, (lat, lon), app_key, session)
             road_km = round(dist_m / 1000, 2)
+            dur_text = format_duration(dur_s)
         except TmapError as exc:
-            print(f"  [{idx}/{len(screened)}] {company}: 경로 실패 ({exc})")
+            status = f"실패: {exc}"
+        results.append({
+            "업체명": name,
+            "주소": addr,
+            "거리(km)": road_km,
+            "시간": dur_text,
+            "직선거리(km)": round(straight, 2),
+            "상태": status,
+        })
+        if i % 20 == 0 or i == len(candidates):
+            print(f"  경로조회 {i}/{len(candidates)}")
+        time.sleep(getattr(config, "REQUEST_DELAY", 0.2))
+
+    final = [r for r in results
+             if r["상태"] == "성공" and r["거리(km)"] != "" and r["거리(km)"] <= max_km]
+    over = [r for r in results
+            if r["상태"] == "성공" and r["거리(km)"] != "" and r["거리(km)"] > max_km]
+    failed = [r for r in results if r["상태"] != "성공"]
+    final.sort(key=lambda r: r["거리(km)"])
+
+    op = out_path(input_path, max_km)
+    fields = ["업체명", "주소", "거리(km)", "시간", "직선거리(km)"]
+    with open(op, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(final)
+
+    print(f"  도로거리 {max_km}km 이내 최종 {len(final)}건 -> {op}")
+    if over:
+        print(f"  (직선x{buffer}는 통과했으나 도로거리 초과 {len(over)}건 제외)")
+    if failed:
+        print(f"  (API 실패 {len(failed)}건 - 네트워크/주소 확인 필요)")
+    return op
+
+
+def main():
+    p = argparse.ArgumentParser(description="기준 주소에서 N km 이내 업체 필터(직선x1.2 1차 + 경로 API 2차)")
+    p.add_argument("-i", "--input", action="append", help="좌표 CSV (여러 번 지정 가능)")
+    p.add_argument("--origin", default=getattr(config, "ORIGIN_ADDRESS", None),
+                   help="기준 주소 (지오코딩). 미지정 시 config.ORIGIN_ADDRESS")
+    p.add_argument("--origin-latlon", default=None,
+                   help="기준 좌표 'lat,lon' 직접 지정(지오코딩 생략)")
+    p.add_argument("--max-km", type=float, default=50.0, help="기준 거리(km), 기본 50")
+    p.add_argument("--buffer", type=float, default=1.2,
+                   help="직선거리 우회계수(1차 스크리닝). 기본 1.2")
+    args = p.parse_args()
+
+    app_key = config.APP_KEY
+    if not app_key or app_key.startswith("여기에"):
+        sys.exit("[오류] config.py 의 APP_KEY 를 설정하세요.")
+
+    session = requests.Session()
+
+    if args.origin_latlon:
+        try:
+            la, lo = [float(x) for x in args.origin_latlon.split(",")]
+            origin = (la, lo)
+            print(f"기준점(좌표 지정): 위도 {la}, 경도 {lo}")
+        except ValueError:
+            sys.exit("[오류] --origin-latlon 형식은 'lat,lon' (예: 35.16,128.99)")
+    else:
+        if not args.origin or args.origin.startswith("여기에"):
+            sys.exit("[오류] 기준 주소를 --origin 또는 config.ORIGIN_ADDRESS 로 지정하세요.")
+        try:
+            origin = geocode(args.origin, app_key, session)
+        except TmapError as exc:
+            sys.exit(f"[오류] 기준 주소 지오코딩 실패: {args.origin} ({exc})")
+        print(f"기준점: {args.origin} -> 위도 {origin[0]}, 경도 {origin[1]}")
+
+    inputs = args.input or DEFAULT_INPUTS
+    for path in inputs:
+        if not os.path.exists(path):
+            print(f"[건너뜀] 파일 없음: {path}")
             continue
+        process_file(path, origin, args.max_km, app_key, session, args.buffer)
 
-        if road_km <= max_km:
-            results.append({
-                "업체명": company,
-                "주소": addr,
-                "위도": lat,
-                "경도": lon,
-                "직선거리(km)": round(straight, 2),
-                "도로거리(km)": road_km,
-                "예상시간": format_duration(dur_s),
-            })
-            print(f"  [{idx}/{len(screened)}] {company}: "
-                  f"{road_km}km, {format_duration(dur_s)} ✓")
 
-    # 결과 저장
-    out_path = os.path.join(os.path.dirname(input_path), _output_name(input_path, max_km))
-    fields = ["업체명", "주소", "위도", "경도", "직선거리(km)", "도로거리(km)", "예상시간"]
-    # 가까운 순으로 정렬
-    results.sort(key=lambda r: r["도로거리(km)"])
-    with open(out_path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fields)
-        writer.writeheader()
-        writer.writerows(results)
-
-    print(f"  => 최종 {len(results)}건 (도로거리 {max_km}km 이내) 저장: "
-          f"{os.path.basename(out_path)}")
-    return out_path
+if __name__ == "__main__":
+    main()
