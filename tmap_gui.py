@@ -8,7 +8,7 @@
   2) 통과분만 TMAP 화물차 경로 API로 실제 거리/시간 조회
 를 실행하고 결과 CSV(콘크리트_50km이내.csv 등)를 같은 폴더에 저장한다.
 
-APP KEY 는 입력란 값을 우선 사용하며, 비어 있으면 config.py 의 APP_KEY 를 쓴다.
+APP KEY 는 입력란에 직접 입력한다.
 추가 설치 불필요(파이썬 기본 내장 Tkinter 사용).
 실행:  python tmap_gui.py
 """
@@ -66,9 +66,6 @@ class App:
         ttk.Label(frm, text="APP KEY").grid(row=r, column=0, sticky="w", **pad)
         self.appkey = ttk.Entry(frm, width=44, show="*")
         self.appkey.grid(row=r, column=1, columnspan=2, sticky="we", **pad)
-        ak = _cfg("APP_KEY")
-        if ak and not ak.startswith("여기에"):
-            self.appkey.insert(0, ak)
         self.show_key = tk.BooleanVar(value=False)
         ttk.Checkbutton(frm, text="표시", variable=self.show_key,
                         command=self._toggle_key).grid(row=r, column=3, sticky="w")

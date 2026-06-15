@@ -1,18 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-설정 템플릿.
+설정 템플릿. (차량 제원/기준주소 등)
 이 파일을 config.py 로 복사한 뒤 값을 채워 넣으세요.
 
     cp config_example.py config.py
 
-config.py 는 APP KEY 등 개인 정보를 담으므로 .gitignore 에 의해
-저장소에 커밋되지 않습니다.
+※ APP KEY 는 여기에 넣지 않습니다. 프로그램 실행 시 직접 입력합니다.
 """
 
-# TMAP(SK open API) 프로젝트 APP KEY
-APP_KEY = "여기에_발급받은_APP_KEY_입력"
-
-# 기준 위치(출발지) 주소 - 통문장 그대로 입력
+# 기준 위치(출발지) 주소 - 통문장 그대로 입력 (GUI/CLI 의 기본값으로 쓰임, 선택)
 ORIGIN_ADDRESS = "여기에_기준위치_주소_입력"
 
 # 입출력 CSV 경로 (CLI 인자 -i / -o 로 덮어쓸 수 있음)

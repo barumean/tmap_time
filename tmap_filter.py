@@ -10,13 +10,14 @@
   2) 2차 정밀(API): 1차 통과분에만 TMAP 화물차 경로 API로 실제 도로거리/시간 조회.
 
 결과 CSV 컬럼: 업체명, 주소, 거리(km), 시간   (+직선거리(km) 참고)
-설정(APP_KEY, 차량 제원)은 config.py 사용.
+APP KEY 는 실행 시 직접 입력받는다(--app-key 인자 또는 프롬프트).
+차량 제원은 config.py 를 사용한다.
 
 사용 예:
     python tmap_filter.py --origin "부산 강서구 평강로 271" --max-km 50
     python tmap_filter.py --origin "부산 ..." --max-km 50 --buffer 1.3
     python tmap_filter.py --origin-latlon 35.16,128.99 --max-km 30
-    python tmap_filter.py
+    python tmap_filter.py --app-key 발급받은키 --origin "부산 ..." --max-km 50
 """
 
 import argparse
@@ -31,7 +32,20 @@ import requests
 try:
     import config
 except ImportError:
-    sys.exit("[오류] config.py 가 없습니다. APP_KEY 를 설정하세요.")
+    sys.exit("[오류] config.py 가 없습니다. config_example.py 를 복사해 차량 제원을 설정하세요.")
+
+
+def resolve_app_key(cli_value):
+    """APP KEY 를 직접 입력받는다. 인자가 없으면 실행 중 입력을 요청한다."""
+    key = (cli_value or "").strip()
+    if not key:
+        try:
+            key = input("TMAP APP KEY 입력: ").strip()
+        except EOFError:
+            key = ""
+    if not key:
+        sys.exit("[오류] APP KEY 가 필요합니다. --app-key 로 전달하거나 실행 시 입력하세요.")
+    return key
 
 GEOCODE_URL = "https://apis.openapi.sk.com/tmap/geo/fullAddrGeo"
 TRUCK_ROUTE_URL = "https://apis.openapi.sk.com/tmap/truck/routes"
@@ -250,11 +264,11 @@ def main():
     p.add_argument("--max-km", type=float, default=50.0, help="기준 거리(km), 기본 50")
     p.add_argument("--buffer", type=float, default=1.2,
                    help="직선거리 우회계수(1차 스크리닝). 기본 1.2")
+    p.add_argument("--app-key", default=None,
+                   help="TMAP APP KEY (미지정 시 실행 중 직접 입력)")
     args = p.parse_args()
 
-    app_key = config.APP_KEY
-    if not app_key or app_key.startswith("여기에"):
-        sys.exit("[오류] config.py 의 APP_KEY 를 설정하세요.")
+    app_key = resolve_app_key(args.app_key)
 
     session = requests.Session()
 

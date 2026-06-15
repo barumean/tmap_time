@@ -9,7 +9,8 @@
   3. 화물차 경로안내(truck/routes) API로 기준 위치 -> 목적지 거리/시간을 조회한다.
   4. 결과를 CSV와 콘솔로 출력한다.
 
-설정(APP KEY, 기준 위치, 차량 제원 등)은 config.py 에 분리되어 있다.
+APP KEY 는 실행 시 직접 입력받는다(--app-key 인자 또는 프롬프트).
+기준 위치/차량 제원 등 그 외 설정은 config.py 를 사용한다.
 """
 
 import argparse
@@ -25,7 +26,7 @@ try:
 except ImportError:
     sys.exit(
         "[오류] config.py 가 없습니다. config_example.py 를 config.py 로 복사한 뒤 "
-        "APP_KEY 와 기준 위치를 입력하세요."
+        "차량 제원/기준 위치를 설정하세요. (APP KEY 는 실행 시 직접 입력)"
     )
 
 GEOCODE_URL = "https://apis.openapi.sk.com/tmap/geo/fullAddrGeo"
@@ -34,6 +35,19 @@ TRUCK_ROUTE_URL = "https://apis.openapi.sk.com/tmap/truck/routes"
 
 class TmapError(Exception):
     """TMAP API 호출 중 발생한 오류."""
+
+
+def resolve_app_key(cli_value):
+    """APP KEY 를 직접 입력받는다. 인자가 없으면 실행 중 입력을 요청한다."""
+    key = (cli_value or "").strip()
+    if not key:
+        try:
+            key = input("TMAP APP KEY 입력: ").strip()
+        except EOFError:
+            key = ""
+    if not key:
+        sys.exit("[오류] APP KEY 가 필요합니다. --app-key 로 전달하거나 실행 시 입력하세요.")
+    return key
 
 
 def geocode(full_addr, app_key, session, retries=3):
@@ -194,11 +208,13 @@ def main():
         "--origin", default=None,
         help="기준 위치 주소 (미지정 시 config.ORIGIN_ADDRESS 사용)",
     )
+    parser.add_argument(
+        "--app-key", default=None,
+        help="TMAP APP KEY (미지정 시 실행 중 직접 입력)",
+    )
     args = parser.parse_args()
 
-    app_key = config.APP_KEY
-    if not app_key or app_key.startswith("여기에"):
-        sys.exit("[오류] config.py 의 APP_KEY 를 설정하세요.")
+    app_key = resolve_app_key(args.app_key)
 
     origin_addr = args.origin or config.ORIGIN_ADDRESS
     if not origin_addr or origin_addr.startswith("여기에"):
