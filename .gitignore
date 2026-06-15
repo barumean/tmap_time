@@ -3,6 +3,7 @@ config.py
 
 # 실행 결과물
 output.csv
+*km이내.csv
 
 # 파이썬
 __pycache__/
