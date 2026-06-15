@@ -1,0 +1,11 @@
+# 개인 설정 (APP KEY 등) - 저장소에 올리지 않음
+config.py
+
+# 실행 결과물
+output.csv
+
+# 파이썬
+__pycache__/
+*.pyc
+.venv/
+venv/
