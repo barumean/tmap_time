@@ -11,7 +11,7 @@
 pip install -r requirements.txt
 ```
 
-## 1-1. TMAP APP KEY 발급 방법
+## 1-1. (필수) TMAP APP KEY 발급 방법
 
 거리/경로 조회에는 SK open API 의 APP KEY 가 필요합니다.
 
@@ -21,8 +21,6 @@ pip install -r requirements.txt
    - 사용할 API: **Geocoding(전체주소)**, **화물차 경로안내** (필요 시 자동차 경로안내)
 4. 프로젝트 상세에서 발급된 **APP KEY**(= Project Key) 복사
 5. `config.py` 의 `APP_KEY` 에 붙여넣기
-
-> 무료 제공량(일/월 호출 한도)이 있으니 프로젝트 페이지에서 한도를 확인하세요.
 
 ## 2. 설정
 
