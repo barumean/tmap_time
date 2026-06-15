@@ -22,12 +22,12 @@ OUTPUT_CSV = "output.csv"
 # API 호출 간 지연(초). 과도한 호출/레이트리밋 방지용.
 REQUEST_DELAY = 0.2
 
-# ----- 화물차 제원 (truck/routes API 필수값) -----
+# ----- 화물차 제원 (truck/routes API 필수값) : 20톤 덤프트럭 기준 -----
 # truckType: 1 화물자동차, 2 건설기계, 3 특수자동차, 4 위험물,
 #            5 승용/소형, 6 중형승합, 7 대형승합
 TRUCK_TYPE = 1
-TRUCK_WIDTH = 250          # 차폭 (cm, 100~300)
-TRUCK_HEIGHT = 340         # 높이 (cm, 100~600)
-TRUCK_WEIGHT = 25500       # 적재중량 (kg, 500~40000)
-TRUCK_TOTAL_WEIGHT = 26000  # 총중량 (kg, 500~40000)
-TRUCK_LENGTH = 880         # 길이 (cm, 200~4000)
+TRUCK_WIDTH = 250          # 차폭 (cm, 100~300) - 법정 최대
+TRUCK_HEIGHT = 330         # 높이 (cm, 100~600)
+TRUCK_WEIGHT = 20000       # 적재중량 (kg, 500~40000) - 20톤
+TRUCK_TOTAL_WEIGHT = 33000  # 총중량 (kg, 500~40000) - 자체중량 약 13t + 적재 20t
+TRUCK_LENGTH = 800         # 길이 (cm, 200~4000)
